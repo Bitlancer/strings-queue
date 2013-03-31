@@ -1,0 +1,7 @@
+*~
+*.pyc
+env
+tmp
+.vagrant
+Vagrantfile
+todo.org
