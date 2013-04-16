@@ -1,0 +1,305 @@
+#!/usr/bin/env python
+
+"""
+Module for processing requests to the stack queue.
+"""
+
+from collections import namedtuple
+import logging
+from multiprocessing import Pool
+from optparse import OptionParser
+import requests
+import signal
+import sys
+import time
+
+from jobqueue import db
+
+
+logging.basicConfig(level=logging.INFO,
+                    stream=sys.stderr,
+                    format="%(asctime)s  %(message)s")
+
+
+# Result codes for the db.
+SUCCESS = 0
+PERMANENT_FAILURE = 1
+TEMPORARY_FAILURE = 2
+
+
+MAX_RETRIES = 5
+
+
+LOCK_TIMEOUT_SECS = 10
+
+
+JobInfo = namedtuple('JobInfo', ['id', 'http_method', 'url', 'body',
+                                 'timeout_secs', 'started_at', 'result_code',
+                                 'retry_count'])
+
+
+# This can come from config if we like.
+DEFAULT_POOL_SIZE = 5
+
+
+# global multiprocessing.pool
+pool = None
+
+
+def _log_to_db(curs, job_id, msg):
+    msg = "[JOBID %s] %s" % (job_id, msg)
+    logging.info(msg)
+    insert = """
+             INSERT INTO queued_job_log
+               (job_id, msg)
+             VALUES
+               (%s, %s)
+             """
+    curs.execute(insert, (job_id, msg))
+
+
+def _find_job(curs, job_id):
+    select = """
+             SELECT id, http_method, url, body, timeout_secs,
+                        started_at, result_code, retry_count
+             FROM queued_job
+             WHERE id = %s
+             """
+    curs.execute(select, (job_id,))
+    row = curs.fetchone()
+    if not row:
+        return None
+    else:
+        return JobInfo(id=row[0],
+                       http_method=row[1],
+                       url=row[2],
+                       body=row[3],
+                       timeout_secs=row[4],
+                       started_at=row[5],
+                       result_code=row[6],
+                       retry_count=row[7])
+
+
+class JobResult(object):
+    """
+    Represents the result of attempting to call a single queued job.
+    """
+
+    def __init__(self, is_timeout=False, status_code=None, text=None):
+        self.is_timeout = is_timeout
+        self.status_code = status_code
+        self.text = text
+
+    def is_success(self):
+        """
+        True if the job was successful.
+        """
+        return self.status_code == 200
+
+    def is_permanent_failure(self):
+        """
+        True if the job was a permanent failure.
+
+        A permanent failure:
+
+        - was not a timeout and
+        - was not an error code 503
+        """
+        return not is_timeout and self.status_code != 503
+
+
+def _mark_started(curs, job_id):
+    mark = """
+           UPDATE queued_job
+             SET started_at = NOW()
+             WHERE id = %s
+           """
+    curs.execute(mark, (job_id,))
+
+
+def _call_job(curs, job_info):
+    # open up an http connection, hit the endpoint, with a timeout.
+    # return the JobResult object that we get from parsing the json
+    # returned.
+    _mark_started(curs, job_info.id)
+    _log_to_db(curs, job_info.id,
+               "Calling job with method %s on url %s (timeout %s)" %
+               (job_info.http_method,
+                job_info.url,
+                job_info.timeout_secs))
+
+    try:
+        resp = requests.request(job_info.http_method,
+                                job_info.url,
+                                data=job_info.body,
+                                timeout=float(job_info.timeout_secs))
+    except requests.Timeout:
+        return JobResult(is_timeout=True)
+
+    return JobResult(status_code=resp.status_code,
+                     text=resp.text)
+
+
+def _set_result_code(curs, job_id, result_code):
+    mark_done = """
+                UPDATE queued_job
+                  SET result_code = %s
+                  WHERE id = %s
+                """
+    curs.execute(mark_done, (result_code, job_id))
+
+
+def _mark_finished(curs, job_id):
+    mark = """
+           UPDATE queued_job
+             SET finished_at = NOW()
+             WHERE id = %s
+           """
+    curs.execute(mark, (job_id,))
+
+
+def _log_success(curs, job_id, result):
+    """
+    Log a success for job_id.
+    """
+    _mark_finished(curs, job_id)
+    _set_result_code(curs, job_id, SUCCESS)
+    _log_to_db(curs, job_id, "Job succeeded: %s" % result.text)
+
+
+def _bump_retries(curs, job_id):
+    bump = """
+           UPDATE queued_job
+             SET retry_count = retry_count + 1
+             WHERE id = %s
+           """
+    curs.execute(bump, (job_id,))
+
+
+def _log_failure(curs, job_id, result):
+    """
+    Log a failure for job_id.
+    """
+    msg = "Job failed"
+    if result.is_permanent_failure():
+        result_code = PERMANENT_FAILURE
+        msg += " permanently."
+    else:
+        result_code = TEMPORARY_FAILURE
+        msg += " temporarily."
+    msg += (" %s" % result.text)
+    _log_to_db(curs, job_id, msg)
+    _set_result_code(curs, job_id, result_code)
+    _bump_retries(curs, job_id)
+
+
+def _fmt_lock_id(job_id):
+    return "lock_job_%s" % job_id
+
+
+def _lock_job(curs, job_id):
+    acquire_lock = """
+                   SELECT GET_LOCK(%s, %s)
+                   """
+    curs.execute(acquire_lock, (_fmt_lock_id(job_id), LOCK_TIMEOUT_SECS))
+    return curs.fetchone()[0] == 1
+
+
+def _is_workable(job_info):
+    return ((job_info.result_code is None or
+             job_info.result_code == TEMPORARY_FAILURE) and
+            job_info.retry_count < MAX_RETRIES)
+
+
+def process_one(job_id):
+    conn = None
+    curs = None
+
+    try:
+        conn = db.open_conn()
+        curs = conn.cursor()
+        if not _lock_job(curs, job_id):
+            _log_to_db(curs, job_id, "Could not acquire lock on job %s" % job_id)
+            return None
+        job_info = _find_job(curs, job_id)
+        if not job_info:
+            _log_to_db(curs, job_id, "Could not find job %s" % job_id)
+            return None
+        if not _is_workable(job_info):
+            _log_to_db(curs, job_id, "Job not workable, skipping")
+            return None
+        result = _call_job(curs, job_info)
+        if result.is_success():
+            _log_success(curs, job_id, result)
+        else:
+            _log_failure(curs, job_id, result)
+    finally:
+        # This will automatically release the lock, if one was
+        # acquired.
+        if curs:
+            curs.close()
+        if conn:
+            conn.close()
+
+
+def _find_all_pending(curs):
+    select = """SELECT id
+                FROM queued_job
+                WHERE (result_code IS NULL OR
+                       result_code = %s) AND
+                      retry_count < %s
+             """
+    curs.execute(select, (TEMPORARY_FAILURE, MAX_RETRIES))
+    rows = curs.fetchall()
+    return [r[0] for r in rows]
+
+
+def process_all():
+    global pool
+
+    logging.info("Processing all...")
+
+    conn = None
+    curs = None
+
+    try:
+        logging.info("Opening connection to db...")
+        conn = db.open_conn()
+        curs = conn.cursor()
+        logging.info("Done opening db connection.")
+        # we don't worry about race conditions on starting jobs, since
+        # the locking in the single processor will make sure that only
+        # one job at a time is actually processing.
+        logging.info("Finding pending jobs...")
+        pending_job_ids = _find_all_pending(curs)
+        logging.info("Done, found %d pending jobs: %s.",
+                     len(pending_job_ids),
+                     pending_job_ids)
+        return pool.map_async(process_one, pending_job_ids)
+    finally:
+        if curs:
+            curs.close()
+        if conn:
+            conn.close()
+        logging.info("Done processing all.")
+
+
+def main(num_procs):
+    global pool
+    logging.info("Initializing pool of size %d", num_procs)
+    pool = Pool(DEFAULT_POOL_SIZE)
+    result = process_all()
+    result.get()
+
+
+if __name__ == '__main__':
+    # TODO: usage
+    parser = OptionParser()
+    parser.add_option("-p", "--procs",
+                      type="int", default=DEFAULT_POOL_SIZE,
+                      dest="num_procs",
+                      help="Number of processes to run (default %s)" % DEFAULT_POOL_SIZE)
+    (opts, args) = parser.parse_args()
+
+    main(num_procs=opts.num_procs)
+

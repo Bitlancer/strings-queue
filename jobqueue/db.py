@@ -18,11 +18,11 @@ def open_conn():
         db = MySQLdb.connect(host='localhost',
                              user='root',
                              passwd='root',
-                             db='stringstest')
+                             db='strings_queue_test')
     else:
         # TODO: add ENV sensor here for db creds / namep
         db = MySQLdb.connect(host='localhost',
                              user='root',
                              passwd='root',
-                             db='stringsdev')
+                             db='strings_queue')
     return db
