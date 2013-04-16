@@ -1,4 +1,4 @@
-strings-stackconnector
-======================
+strings-queue
+=============
 
-Bitlancer Strings Stack Connector
+Bitlancer Strings Queue
