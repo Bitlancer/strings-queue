@@ -307,7 +307,8 @@ def main(num_procs, db_conf_fname):
 
 if __name__ == '__main__':
     parser = OptionParser(usage=dedent("""\
-                                       %prog [options] conf_file
+                                       [options] conf_file
+                                       -h or --help for help.
 
                                        Processes any workable queued jobs and then quits.
 
