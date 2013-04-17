@@ -5,13 +5,13 @@ Module for processing requests to the stack queue.
 """
 
 from collections import namedtuple
+from ConfigParser import SafeConfigParser
 import logging
 from multiprocessing import Pool
 from optparse import OptionParser
 import requests
-import signal
 import sys
-import time
+from textwrap import dedent
 
 from jobqueue import db
 
@@ -40,10 +40,6 @@ JobInfo = namedtuple('JobInfo', ['id', 'http_method', 'url', 'body',
 
 # This can come from config if we like.
 DEFAULT_POOL_SIZE = 5
-
-
-# global multiprocessing.pool
-pool = None
 
 
 def _log_to_db(curs, job_id, msg):
@@ -191,6 +187,7 @@ def _log_failure(curs, job_id, result):
     _log_to_db(curs, job_id, msg)
     _set_result_code(curs, job_id, result_code)
     _bump_retries(curs, job_id)
+    _mark_finished(curs, job_id)
 
 
 def _fmt_lock_id(job_id):
@@ -211,19 +208,21 @@ def _is_workable(job_info):
             job_info.retry_count < MAX_RETRIES)
 
 
-def process_one(job_id):
+def process_one(job_id_and_db_config):
+    job_id, db_config = job_id_and_db_config
+
     conn = None
     curs = None
 
     try:
-        conn = db.open_conn()
+        conn = db.open_conn(db_config)
         curs = conn.cursor()
         if not _lock_job(curs, job_id):
-            _log_to_db(curs, job_id, "Could not acquire lock on job %s" % job_id)
+            _log_to_db(curs, job_id, "Could not acquire lock on job")
             return None
         job_info = _find_job(curs, job_id)
         if not job_info:
-            _log_to_db(curs, job_id, "Could not find job %s" % job_id)
+            _log_to_db(curs, job_id, "Could not find job")
             return None
         if not _is_workable(job_info):
             _log_to_db(curs, job_id, "Job not workable, skipping")
@@ -254,9 +253,7 @@ def _find_all_pending(curs):
     return [r[0] for r in rows]
 
 
-def process_all():
-    global pool
-
+def process_all(pool, db_config):
     logging.info("Processing all...")
 
     conn = None
@@ -264,7 +261,7 @@ def process_all():
 
     try:
         logging.info("Opening connection to db...")
-        conn = db.open_conn()
+        conn = db.open_conn(db_config)
         curs = conn.cursor()
         logging.info("Done opening db connection.")
         # we don't worry about race conditions on starting jobs, since
@@ -275,7 +272,9 @@ def process_all():
         logging.info("Done, found %d pending jobs: %s.",
                      len(pending_job_ids),
                      pending_job_ids)
-        return pool.map_async(process_one, pending_job_ids)
+        return pool.map_async(process_one, [(job_id, db_config)
+                                            for job_id
+                                            in pending_job_ids])
     finally:
         if curs:
             curs.close()
@@ -284,22 +283,52 @@ def process_all():
         logging.info("Done processing all.")
 
 
-def main(num_procs):
-    global pool
+def _parse_db_config(db_conf_fname):
+    config_parser = SafeConfigParser()
+
+    with open(db_conf_fname, 'rb') as fil:
+        config_parser.readfp(fil)
+
+    return dict(host=config_parser.get('db', 'host'),
+                user=config_parser.get('db', 'user'),
+                passwd=config_parser.get('db', 'passwd'),
+                db=config_parser.get('db', 'db'))
+
+
+def main(num_procs, db_conf_fname):
+    logging.info("Reading database config from %s", db_conf_fname)
+    db_config = _parse_db_config(db_conf_fname)
+
     logging.info("Initializing pool of size %d", num_procs)
     pool = Pool(DEFAULT_POOL_SIZE)
-    result = process_all()
+    result = process_all(pool, db_config)
     result.get()
 
 
 if __name__ == '__main__':
-    # TODO: usage
-    parser = OptionParser()
+    parser = OptionParser(usage=dedent("""\
+                                       %prog [options] conf_file
+
+                                       Processes any workable queued jobs and then quits.
+
+                                       conf_file should be a path to a ini-like file containing:
+
+                                       [db]
+                                       host: <db_host>
+                                       user: <db_user>
+                                       passwd: <db_passwd>
+                                       db: <db_name>
+                                       """))
     parser.add_option("-p", "--procs",
                       type="int", default=DEFAULT_POOL_SIZE,
                       dest="num_procs",
                       help="Number of processes to run (default %s)" % DEFAULT_POOL_SIZE)
+
     (opts, args) = parser.parse_args()
 
-    main(num_procs=opts.num_procs)
+    if len(args) != 1:
+        parser.error("Must pass exactly one conf file.")
+
+    main(num_procs=opts.num_procs,
+         db_conf_fname=args[0])
 

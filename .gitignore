@@ -5,3 +5,4 @@ tmp
 .vagrant
 Vagrantfile
 todo.org
+db.ini

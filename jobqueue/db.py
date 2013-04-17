@@ -13,16 +13,13 @@ def end_test():
     in_test = False
 
 
-def open_conn():
+def open_conn(db_config):
     if in_test:
         db = MySQLdb.connect(host='localhost',
                              user='root',
                              passwd='root',
                              db='strings_queue_test')
     else:
-        # TODO: add ENV sensor here for db creds / namep
-        db = MySQLdb.connect(host='localhost',
-                             user='root',
-                             passwd='root',
-                             db='strings_queue')
+        db = MySQLdb.connect(**db_config)
+
     return db
