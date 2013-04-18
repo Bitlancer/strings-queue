@@ -289,10 +289,7 @@ def _parse_db_config(db_conf_fname):
     with open(db_conf_fname, 'rb') as fil:
         config_parser.readfp(fil)
 
-    return dict(host=config_parser.get('db', 'host'),
-                user=config_parser.get('db', 'user'),
-                passwd=config_parser.get('db', 'passwd'),
-                db=config_parser.get('db', 'db'))
+    return config_parser
 
 
 def main(num_procs, db_conf_fname):
