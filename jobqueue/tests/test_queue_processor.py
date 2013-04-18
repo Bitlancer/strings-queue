@@ -221,7 +221,22 @@ class TestQueueProcessor(unittest.TestCase):
         queue_processor.process_with_pool(1, _read_default_db_ini())
         eq_(786, self._get_retry_delay_secs(job_id))
 
-    # TODO: test multiple jobs
+    # help protect against deadlock
+    @timed(10)
+    def test_multiple_jobs(self):
+        job_id_one = self._queue_job('post', '/test', body="this is a test body")
+        job_id_two = self._queue_job('get', '/test')
+        self._start_server(_make_handler_class('TestMultipleJobs', 200))
+        # make sure that even running with 1 process, we do both jobs
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        self._assert_done(
+            job_id_one,
+            queue_processor.SUCCESS,
+            "[JOBID %s] Job succeeded: POST 200" % job_id_one)
+        self._assert_done(
+            job_id_two,
+            queue_processor.SUCCESS,
+            "[JOBID %s] Job succeeded: GET 200" % job_id_two)
 
     ################
     # HELPER FUNCS #
