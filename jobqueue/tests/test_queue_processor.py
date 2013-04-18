@@ -110,6 +110,35 @@ class TestQueueProcessor(unittest.TestCase):
             queue_processor.PERMANENT_FAILURE,
             "[JOBID %(job_id)s] Job failed permanently: GET %(resp_code)s")
 
+    def test_body_received_on_post(self):
+        job_id = self._queue_job('post', '/test', body="this is a test body")
+
+        def _never_called(other_self):
+            ok_(False)
+
+        body_seen = []
+
+        def _do_post(other_self):
+            other_self.send_response(200)
+            other_self.send_header('Content-type','text/text')
+            other_self.end_headers()
+            other_self.wfile.write("POST 200")
+            content_len = int(other_self.headers.getheader('content-length'))
+            body_seen.append(other_self.rfile.read(content_len))
+
+        self._start_server(_make_handler_class('CheckBody',
+                                               200,
+                                               do_GET=_never_called,
+                                               do_POST=_do_post))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        self._assert_done(job_id, queue_processor.SUCCESS,
+                          "[JOBID %s] Job succeeded: POST 200" % job_id)
+
+        eq_(1, len(body_seen))
+        eq_("this is a test body", body_seen[0])
+
+
+
     # TODO: test timeout
 
     # TODO: test multiple jobs
