@@ -205,6 +205,22 @@ class TestQueueProcessor(unittest.TestCase):
             queue_processor.TEMPORARY_FAILURE,
             "[JOBID %s] Job failed due to timeout" % job_id)
 
+    # help protect against deadlock
+    @timed(10)
+    def test_respects_new_retry_delay_secs(self):
+        def _new_retry_delay_seconds(other_self):
+            other_self.send_response(503)
+            other_self.send_header('x-bitlancer-retry-delay-secs','786')
+            other_self.end_headers()
+            other_self.wfile.write("GET 503")
+
+        job_id = self._queue_job('get', '/test', retry_delay_secs=10)
+        eq_(10, self._get_retry_delay_secs(job_id))
+        self._start_server(_make_handler_class('TestRetryDelaySeconds', 503,
+                                               do_GET=_new_retry_delay_seconds))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        eq_(786, self._get_retry_delay_secs(job_id))
+
     # TODO: test multiple jobs
 
     ################
@@ -222,6 +238,13 @@ class TestQueueProcessor(unittest.TestCase):
         curs.execute("SELECT remaining_retries FROM queued_job WHERE id = %s",
                      (job_id,))
         return curs.fetchone()[0]
+
+    def _get_retry_delay_secs(self, job_id):
+        curs = self.conn.cursor()
+        curs.execute("SELECT retry_delay_secs FROM queued_job WHERE id = %s",
+                     (job_id,))
+        return curs.fetchone()[0]
+
 
     def _assert_done(self, job_id, status, text):
         curs = self.conn.cursor()

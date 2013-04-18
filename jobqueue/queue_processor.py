@@ -80,10 +80,12 @@ class JobResult(object):
     Represents the result of attempting to call a single queued job.
     """
 
-    def __init__(self, is_timeout=False, status_code=None, text=None):
+    def __init__(self, is_timeout=False, status_code=None, text=None,
+                 new_retry_delay_secs=None):
         self.is_timeout = is_timeout
         self.status_code = status_code
         self.text = text
+        self.new_retry_delay_secs = new_retry_delay_secs
 
     def is_success(self):
         """
@@ -116,6 +118,9 @@ def _call_job(curs, job_info):
     # open up an http connection, hit the endpoint, with a timeout.
     # return the JobResult object that we get from parsing the json
     # returned.
+    new_retry_delay_secs = None
+    text = None
+
     _mark_started(curs, job_info.id)
     _log_to_db(curs, job_info.id,
                "Calling job with method %s on url %s (timeout %s)" %
@@ -128,11 +133,16 @@ def _call_job(curs, job_info):
                                 job_info.url,
                                 data=job_info.body,
                                 timeout=float(job_info.timeout_secs))
+        text = resp.text
+        # if the request has temporarily failed, and asked for a new
+        # retry delay, respect it
+        new_retry_delay_secs = resp.headers['x-bitlancer-retry-delay-secs']
     except requests.Timeout:
         return JobResult(is_timeout=True)
 
     return JobResult(status_code=resp.status_code,
-                     text=resp.text)
+                     text=resp.text,
+                     new_retry_delay_secs=new_retry_delay_secs)
 
 
 def _set_result_code(curs, job_id, result_code):
@@ -229,6 +239,7 @@ def process_one(job_id_and_db_config):
             _log_to_db(curs, job_id, "Job not workable, skipping")
             return None
         result = _call_job(curs, job_info)
+        _maybe_update_retry(curs, job_id, result)
         if result.is_success():
             _log_success(curs, job_id, result)
         else:
@@ -241,6 +252,17 @@ def process_one(job_id_and_db_config):
             curs.close()
         if conn:
             conn.close()
+
+
+def _maybe_update_retry(curs, job_id, result):
+    if result.new_retry_delay_secs is not None:
+
+        curs.execute("""
+                     UPDATE queued_job
+                       SET retry_delay_secs = %s
+                       WHERE id = %s
+                     """,
+                     (result.new_retry_delay_secs, job_id))
 
 
 def _find_all_pending(curs):
