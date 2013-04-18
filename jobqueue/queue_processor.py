@@ -178,11 +178,13 @@ def _log_failure(curs, job_id, result):
     msg = "Job failed"
     if result.is_permanent_failure():
         result_code = PERMANENT_FAILURE
-        msg += " permanently:"
+        msg += (" permanently: %s"  % result.text)
+    elif result.is_timeout:
+        result_code = TEMPORARY_FAILURE
+        msg += " due to timeout"
     else:
         result_code = TEMPORARY_FAILURE
-        msg += " temporarily:"
-    msg += (" %s" % result.text)
+        msg += (" temporarily: %s"  % result.text)
     _log_to_db(curs, job_id, msg)
     _set_result_code(curs, job_id, result_code)
     _decrement_retries(curs, job_id)

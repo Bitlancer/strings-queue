@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 
-from nose.tools import ok_, eq_
+from nose.tools import ok_, eq_, timed
 
 from jobqueue import db, queue_processor
 
@@ -93,24 +93,32 @@ class TestQueueProcessor(unittest.TestCase):
                           template_str % (dict(job_id=job_id,
                                                resp_code=resp_code)))
 
+    # help protect against deadlock
+    @timed(10)
     def test_simple_endpoint(self):
         self._do_test_job_simple(
             200,
             queue_processor.SUCCESS,
             "[JOBID %(job_id)s] Job succeeded: GET %(resp_code)s")
 
+    # help protect against deadlock
+    @timed(10)
     def test_temporary_failure(self):
         self._do_test_job_simple(
             503,
             queue_processor.TEMPORARY_FAILURE,
             "[JOBID %(job_id)s] Job failed temporarily: GET %(resp_code)s")
 
+    # help protect against deadlock
+    @timed(10)
     def test_permanent_failure(self):
         self._do_test_job_simple(
             500,
             queue_processor.PERMANENT_FAILURE,
             "[JOBID %(job_id)s] Job failed permanently: GET %(resp_code)s")
 
+    # help protect against deadlock
+    @timed(10)
     def test_body_received_on_post(self):
         job_id = self._queue_job('post', '/test', body="this is a test body")
 
@@ -138,6 +146,8 @@ class TestQueueProcessor(unittest.TestCase):
         eq_(1, len(body_seen))
         eq_("this is a test body", body_seen[0])
 
+    # help protect against deadlock
+    @timed(10)
     def test_retries(self):
         job_id = self._queue_job('get', '/test', remaining_retries=1)
         self._start_server(_make_handler_class('TestRetriesHandler', 503))
@@ -155,11 +165,13 @@ class TestQueueProcessor(unittest.TestCase):
         # the job should not have been re-worked
         eq_(last_started_at, second_last_started_at)
 
+    # help protect against deadlock
+    @timed(10)
     def test_delay_secs(self):
         # this is crappy time based stuff, and yet it's better than
         # not testing IMHO.
         job_id = self._queue_job('get', '/test', retry_delay_secs=3)
-        self._start_server(_make_handler_class('TestRetriesHandler', 503))
+        self._start_server(_make_handler_class('TestDelaysHandler', 503))
         queue_processor.process_with_pool(1, _read_default_db_ini())
         self._assert_done(
             job_id,
@@ -177,6 +189,28 @@ class TestQueueProcessor(unittest.TestCase):
         third_last_started_at = self._get_last_started_at(job_id)
         ok_(last_started_at != third_last_started_at)
 
+    # help protect against deadlock
+    @timed(10)
+    def test_time_out(self):
+        # this is crappy time based stuff, and yet it's better than
+        # not testing IMHO.
+        def _sleep_little_baby(other_self):
+            time.sleep(5)
+        job_id = self._queue_job('get', '/test', timeout_secs=1)
+        self._start_server(_make_handler_class('TestTimeoutHandler', 503,
+                                               do_GET=_sleep_little_baby))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        self._assert_done(
+            job_id,
+            queue_processor.TEMPORARY_FAILURE,
+            "[JOBID %s] Job failed due to timeout" % job_id)
+
+    # TODO: test multiple jobs
+
+    ################
+    # HELPER FUNCS #
+    ################
+
     def _get_last_started_at(self, job_id):
         curs = self.conn.cursor()
         curs.execute("SELECT last_started_at FROM queued_job WHERE id = %s",
@@ -188,13 +222,6 @@ class TestQueueProcessor(unittest.TestCase):
         curs.execute("SELECT remaining_retries FROM queued_job WHERE id = %s",
                      (job_id,))
         return curs.fetchone()[0]
-
-
-    # TODO: test timeout
-
-    # TODO: test multiple jobs
-
-    # TODO: test body received on post
 
     def _assert_done(self, job_id, status, text):
         curs = self.conn.cursor()
