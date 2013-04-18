@@ -101,7 +101,7 @@ class JobResult(object):
         - was not a timeout and
         - was not an error code 503
         """
-        return not is_timeout and self.status_code != 503
+        return not self.is_timeout and self.status_code != 503
 
 
 def _mark_started(curs, job_id):
@@ -179,10 +179,10 @@ def _log_failure(curs, job_id, result):
     msg = "Job failed"
     if result.is_permanent_failure():
         result_code = PERMANENT_FAILURE
-        msg += " permanently."
+        msg += " permanently:"
     else:
         result_code = TEMPORARY_FAILURE
-        msg += " temporarily."
+        msg += " temporarily:"
     msg += (" %s" % result.text)
     _log_to_db(curs, job_id, msg)
     _set_result_code(curs, job_id, result_code)
@@ -232,6 +232,7 @@ def process_one(job_id_and_db_config):
             _log_success(curs, job_id, result)
         else:
             _log_failure(curs, job_id, result)
+        return result
     finally:
         # This will automatically release the lock, if one was
         # acquired.
@@ -292,14 +293,17 @@ def _parse_db_config(db_conf_fname):
     return config_parser
 
 
+def process_with_pool(num_procs, db_config):
+    logging.info("Initializing pool of size %d", num_procs)
+    pool = Pool(num_procs)
+    result = process_all(pool, db_config)
+    return result.get()
+
+
 def main(num_procs, db_conf_fname):
     logging.info("Reading database config from %s", db_conf_fname)
     db_config = _parse_db_config(db_conf_fname)
-
-    logging.info("Initializing pool of size %d", num_procs)
-    pool = Pool(DEFAULT_POOL_SIZE)
-    result = process_all(pool, db_config)
-    result.get()
+    return process_with_pool(num_procs, db_config)
 
 
 if __name__ == '__main__':
