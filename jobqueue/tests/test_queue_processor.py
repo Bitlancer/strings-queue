@@ -6,6 +6,7 @@ from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 from ConfigParser import SafeConfigParser
 import os
 import threading
+import time
 import unittest
 
 from nose.tools import ok_, eq_
@@ -137,6 +138,56 @@ class TestQueueProcessor(unittest.TestCase):
         eq_(1, len(body_seen))
         eq_("this is a test body", body_seen[0])
 
+    def test_retries(self):
+        job_id = self._queue_job('get', '/test', remaining_retries=1)
+        self._start_server(_make_handler_class('TestRetriesHandler', 503))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        self._assert_done(
+            job_id,
+            queue_processor.TEMPORARY_FAILURE,
+            "[JOBID %s] Job failed temporarily: GET 503" % job_id)
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        last_started_at = self._get_last_started_at(job_id)
+        eq_(0, self._get_remaining_retries(job_id))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        eq_(0, self._get_remaining_retries(job_id))
+        second_last_started_at = self._get_last_started_at(job_id)
+        # the job should not have been re-worked
+        eq_(last_started_at, second_last_started_at)
+
+    def test_delay_secs(self):
+        # this is crappy time based stuff, and yet it's better than
+        # not testing IMHO.
+        job_id = self._queue_job('get', '/test', retry_delay_secs=3)
+        self._start_server(_make_handler_class('TestRetriesHandler', 503))
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        self._assert_done(
+            job_id,
+            queue_processor.TEMPORARY_FAILURE,
+            "[JOBID %s] Job failed temporarily: GET 503" % job_id)
+        last_started_at = self._get_last_started_at(job_id)
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        second_last_started_at = self._get_last_started_at(job_id)
+        # the job should not have been re-worked, as we should be
+        # safely within the 3 second delay
+        eq_(last_started_at, second_last_started_at)
+        time.sleep(5)
+        queue_processor.process_with_pool(1, _read_default_db_ini())
+        # now the job should have been reworked
+        third_last_started_at = self._get_last_started_at(job_id)
+        ok_(last_started_at != third_last_started_at)
+
+    def _get_last_started_at(self, job_id):
+        curs = self.conn.cursor()
+        curs.execute("SELECT last_started_at FROM queued_job WHERE id = %s",
+                     (job_id,))
+        return curs.fetchone()[0]
+
+    def _get_remaining_retries(self, job_id):
+        curs = self.conn.cursor()
+        curs.execute("SELECT remaining_retries FROM queued_job WHERE id = %s",
+                     (job_id,))
+        return curs.fetchone()[0]
 
 
     # TODO: test timeout
@@ -159,17 +210,21 @@ class TestQueueProcessor(unittest.TestCase):
         msg = curs.fetchone()[0]
         eq_(text, msg)
 
-    def _queue_job(self, method, uri, body=None, timeout_secs=10):
+    def _queue_job(self, method, uri, body=None, timeout_secs=10, remaining_retries=10,
+                   retry_delay_secs=0):
         curs = self.conn.cursor()
         global port
         curs.execute("""
                      INSERT INTO queued_job
-                       (http_method, url, body, timeout_secs)
+                       (http_method, url, body, timeout_secs, remaining_retries,
+                        retry_delay_secs)
                      VALUES
-                       (%s, %s, %s, %s)
+                       (%s, %s, %s, %s, %s,
+                        %s)
                      """,
                      (method, "http://127.0.0.1:%d%s" % (port, uri),
-                      body, timeout_secs))
+                      body, timeout_secs, remaining_retries,
+                      retry_delay_secs))
         curs.execute("SELECT LAST_INSERT_ID()")
         return curs.fetchone()[0]
 

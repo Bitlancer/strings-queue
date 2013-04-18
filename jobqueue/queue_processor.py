@@ -27,15 +27,12 @@ PERMANENT_FAILURE = 1
 TEMPORARY_FAILURE = 2
 
 
-MAX_RETRIES = 5
-
-
 LOCK_TIMEOUT_SECS = 10
 
 
 JobInfo = namedtuple('JobInfo', ['id', 'http_method', 'url', 'body',
-                                 'timeout_secs', 'started_at', 'result_code',
-                                 'retry_count'])
+                                 'timeout_secs', 'last_started_at', 'result_code',
+                                 'remaining_retries', 'retry_delay_secs'])
 
 
 # This can come from config if we like.
@@ -57,7 +54,8 @@ def _log_to_db(curs, job_id, msg):
 def _find_job(curs, job_id):
     select = """
              SELECT id, http_method, url, body, timeout_secs,
-                        started_at, result_code, retry_count
+                        last_started_at, result_code, remaining_retries,
+                        retry_delay_secs
              FROM queued_job
              WHERE id = %s
              """
@@ -71,9 +69,10 @@ def _find_job(curs, job_id):
                        url=row[2],
                        body=row[3],
                        timeout_secs=row[4],
-                       started_at=row[5],
+                       last_started_at=row[5],
                        result_code=row[6],
-                       retry_count=row[7])
+                       remaining_retries=row[7],
+                       retry_delay_secs=row[8])
 
 
 class JobResult(object):
@@ -107,7 +106,7 @@ class JobResult(object):
 def _mark_started(curs, job_id):
     mark = """
            UPDATE queued_job
-             SET started_at = NOW()
+             SET last_started_at = NOW()
              WHERE id = %s
            """
     curs.execute(mark, (job_id,))
@@ -148,7 +147,7 @@ def _set_result_code(curs, job_id, result_code):
 def _mark_finished(curs, job_id):
     mark = """
            UPDATE queued_job
-             SET finished_at = NOW()
+             SET last_finished_at = NOW()
              WHERE id = %s
            """
     curs.execute(mark, (job_id,))
@@ -163,13 +162,13 @@ def _log_success(curs, job_id, result):
     _log_to_db(curs, job_id, "Job succeeded: %s" % result.text)
 
 
-def _bump_retries(curs, job_id):
-    bump = """
-           UPDATE queued_job
-             SET retry_count = retry_count + 1
-             WHERE id = %s
-           """
-    curs.execute(bump, (job_id,))
+def _decrement_retries(curs, job_id):
+    decrement = """
+                UPDATE queued_job
+                  SET remaining_retries = remaining_retries - 1
+                  WHERE id = %s
+                """
+    curs.execute(decrement, (job_id,))
 
 
 def _log_failure(curs, job_id, result):
@@ -186,7 +185,7 @@ def _log_failure(curs, job_id, result):
     msg += (" %s" % result.text)
     _log_to_db(curs, job_id, msg)
     _set_result_code(curs, job_id, result_code)
-    _bump_retries(curs, job_id)
+    _decrement_retries(curs, job_id)
     _mark_finished(curs, job_id)
 
 
@@ -205,7 +204,7 @@ def _lock_job(curs, job_id):
 def _is_workable(job_info):
     return ((job_info.result_code is None or
              job_info.result_code == TEMPORARY_FAILURE) and
-            job_info.retry_count < MAX_RETRIES)
+            job_info.remaining_retries > 0)
 
 
 def process_one(job_id_and_db_config):
@@ -243,13 +242,19 @@ def process_one(job_id_and_db_config):
 
 
 def _find_all_pending(curs):
-    select = """SELECT id
-                FROM queued_job
-                WHERE (result_code IS NULL OR
-                       result_code = %s) AND
-                      retry_count < %s
+    select = """
+             SELECT id
+             FROM queued_job
+               WHERE
+                  (result_code IS NULL OR result_code = %s)
+                AND
+                  remaining_retries > 0
+                AND
+                  (last_finished_at IS NULL OR
+                   DATE_ADD(last_finished_at,
+                            INTERVAL retry_delay_secs SECOND) <= NOW())
              """
-    curs.execute(select, (TEMPORARY_FAILURE, MAX_RETRIES))
+    curs.execute(select, (TEMPORARY_FAILURE,))
     rows = curs.fetchall()
     return [r[0] for r in rows]
 

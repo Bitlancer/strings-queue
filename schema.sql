@@ -4,10 +4,11 @@ CREATE TABLE IF NOT EXISTS `queued_job` (
        `url` TEXT NOT NULL,
        `body` TEXT NULL,
        `timeout_secs` INT NOT NULL DEFAULT 60,
-       `started_at` TIMESTAMP NULL,
-       `finished_at` TIMESTAMP NULL,
+       `last_started_at` TIMESTAMP NULL,
+       `last_finished_at` TIMESTAMP NULL,
        `result_code` INT NULL,
-       `retry_count` INT NOT NULL DEFAULT 0,
+       `remaining_retries` INT NOT NULL DEFAULT 10,
+       `retry_delay_secs` INT NOT NULL DEFAULT 60,
        PRIMARY KEY (`id`));
 
 CREATE TABLE IF NOT EXISTS `queued_job_log` (
