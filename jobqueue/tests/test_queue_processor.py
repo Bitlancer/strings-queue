@@ -13,67 +13,28 @@ from nose.tools import ok_, eq_
 from jobqueue import db, queue_processor
 
 
-class TestHttpRequestHandler200(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        self.send_response(200)
+def _make_handler_func(resp_code, method):
+    def _handler(self):
+        self.send_response(resp_code)
         self.send_header('Content-type','text/text')
         self.end_headers()
-        self.wfile.write("GET 200")
-
-    def do_POST(self):
-        self.send_response(200)
-        self.send_header('Content-type','text/text')
-        self.end_headers()
-        self.wfile.write("POST 200")
-
-    def log_message(self, *args, **kwargs):
-        """
-        Keep messages out of nosetests output.
-        """
-        pass
+        self.wfile.write("%s %d" % (method, resp_code))
+    return _handler
 
 
-class TestHttpRequestHandler503(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        self.send_response(503)
-        self.send_header('Content-type','text/text')
-        self.end_headers()
-        self.wfile.write("GET 503")
-
-    def do_POST(self):
-        self.send_response(503)
-        self.send_header('Content-type','text/text')
-        self.end_headers()
-        self.wfile.write("POST 503")
-
-    def log_message(self, *args, **kwargs):
-        """
-        Keep messages out of nosetests output.
-        """
-        pass
+def _nolog(*args, **kwargs):
+    pass
 
 
-class TestHttpRequestHandler500(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        self.send_response(500)
-        self.send_header('Content-type','text/text')
-        self.end_headers()
-        self.wfile.write("GET 500")
-
-    def do_POST(self):
-        self.send_response(500)
-        self.send_header('Content-type','text/text')
-        self.end_headers()
-        self.wfile.write("POST 500")
-
-    def log_message(self, *args, **kwargs):
-        """
-        Keep messages out of nosetests output.
-        """
-        pass
+def _make_handler_class(name, resp_code, do_GET=None, do_POST=None):
+    if do_GET is None:
+        do_GET = _make_handler_func(resp_code, "GET")
+    if do_POST is None:
+        do_POST = _make_handler_func(resp_code, "POST")
+    return type(name, (BaseHTTPRequestHandler, object),
+                dict(do_GET=do_GET,
+                     do_POST=do_POST,
+                     log_message=_nolog))
 
 
 def _read_default_db_ini():
@@ -122,26 +83,38 @@ class TestQueueProcessor(unittest.TestCase):
         for table in ['queued_job', 'queued_job_log']:
             curs.execute("TRUNCATE TABLE %s" % table)
 
-    def test_simple_endpoint(self):
+    def _do_test_job_simple(self, resp_code, result_code, template_str):
         job_id = self._queue_job('get', '/test')
-        self._start_server(TestHttpRequestHandler200)
+        self._start_server(_make_handler_class('Handle%d' % resp_code,
+                                               resp_code))
         queue_processor.process_with_pool(1, _read_default_db_ini())
-        self._assert_done(job_id, queue_processor.SUCCESS,
-                          "[JOBID %s] Job succeeded: GET 200" % job_id)
+        self._assert_done(job_id, result_code,
+                          template_str % (dict(job_id=job_id,
+                                               resp_code=resp_code)))
+
+    def test_simple_endpoint(self):
+        self._do_test_job_simple(
+            200,
+            queue_processor.SUCCESS,
+            "[JOBID %(job_id)s] Job succeeded: GET %(resp_code)s")
 
     def test_temporary_failure(self):
-        job_id = self._queue_job('get', '/test')
-        self._start_server(TestHttpRequestHandler503)
-        queue_processor.process_with_pool(1, _read_default_db_ini())
-        self._assert_done(job_id, queue_processor.TEMPORARY_FAILURE,
-                          "[JOBID %s] Job failed temporarily: GET 503" % job_id)
+        self._do_test_job_simple(
+            503,
+            queue_processor.TEMPORARY_FAILURE,
+            "[JOBID %(job_id)s] Job failed temporarily: GET %(resp_code)s")
 
     def test_permanent_failure(self):
-        job_id = self._queue_job('get', '/test')
-        self._start_server(TestHttpRequestHandler500)
-        queue_processor.process_with_pool(1, _read_default_db_ini())
-        self._assert_done(job_id, queue_processor.PERMANENT_FAILURE,
-                          "[JOBID %s] Job failed permanently: GET 500" % job_id)
+        self._do_test_job_simple(
+            500,
+            queue_processor.PERMANENT_FAILURE,
+            "[JOBID %(job_id)s] Job failed permanently: GET %(resp_code)s")
+
+    # TODO: test timeout
+
+    # TODO: test multiple jobs
+
+    # TODO: test body received on post
 
     def _assert_done(self, job_id, status, text):
         curs = self.conn.cursor()
