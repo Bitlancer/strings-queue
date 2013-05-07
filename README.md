@@ -67,7 +67,7 @@ handler, and two tips.
 - Since it's always possible that the connection is broken or
   something fails in the middle of processing, which the queue will
   attempt to retry, you should write your jobs so it doesn't blow up
-  the world if they get called twice.
+  the world if they get called twice. Jobs should be idempotent!
 
 ### Tips
 
