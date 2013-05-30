@@ -30,4 +30,6 @@ def open_conn(config):
             raise Exception("Not in test and no db config!")
         db = MySQLdb.connect(**_settings_from_section(config, 'db'))
 
+    db.autocommit(True)
+
     return db
