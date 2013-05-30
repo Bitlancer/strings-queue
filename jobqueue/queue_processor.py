@@ -147,6 +147,7 @@ def _call_job(curs, job_info, config):
                      text=resp.text,
                      new_retry_delay_secs=new_retry_delay_secs)
 
+
 def _credentials_from_config(config):
     section = 'api'
     if config.has_section(section):
@@ -363,7 +364,6 @@ if __name__ == '__main__':
                                        user: <db_user>
                                        passwd: <db_passwd>
                                        db: <db_name>
-
                                        """))
     parser.add_option("-p", "--procs",
                       type="int", default=DEFAULT_POOL_SIZE,
