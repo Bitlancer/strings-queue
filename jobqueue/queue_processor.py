@@ -271,6 +271,9 @@ def process_one(job_id_and_config):
 def _maybe_update_job(curs, job_id, result):
     set_strs = []
     set_params = []
+    if result.text is not None:
+        set_strs.append("last_response = %s")
+        set_params.append(result.text)
     if result.new_retry_delay_secs is not None:
         set_strs.append("retry_delay_secs = %s")
         set_params.append(result.new_retry_delay_secs)
