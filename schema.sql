@@ -7,7 +7,7 @@ CREATE TABLE `queued_job` (
 	`timeout_secs` int(11) NOT NULL DEFAULT '60' COMMENT 'Job execution timeout',
 	`last_started_at` timestamp NULL DEFAULT NULL COMMENT 'Last time this job was run',
 	`last_finished_at` timestamp NULL DEFAULT NULL COMMENT 'Last time this job completed',
-    `last_response` text COMMENT 'The body from the last response of the last execution',
+        `last_response` text COMMENT 'The body from the last response of the last execution',
 	`result_code` int(11) DEFAULT NULL COMMENT 'HTTP status code',
 	`remaining_retries` int(11) NOT NULL DEFAULT '10' COMMENT 'Number of remaining retries before the job is marked as failed',
 	`retry_delay_secs` int(11) NOT NULL DEFAULT '60' COMMENT 'Do not retry this job for this number of seconds',
