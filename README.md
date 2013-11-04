@@ -11,6 +11,8 @@ Requires:
 - mysql (including devel packages)
 - python pip
 
+```yum install python-devel python-setuptools mysql mysql-devel```
+
 Once these are installed, a
 
     pip install -r requirements.txt
