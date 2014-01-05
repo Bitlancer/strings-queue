@@ -131,11 +131,16 @@ def _call_job(curs, job_info, config):
 
     credentials = _credentials_from_config(config)
 
+    headers = {
+        "x-bitlancer-job-id": job_info.id
+    }
+
     try:
         resp = requests.request(job_info.http_method,
                                 job_info.url,
                                 data=job_info.body,
                                 auth=credentials,
+                                headers=headers,
                                 timeout=float(job_info.timeout_secs))
         text = resp.text
         # if the request has temporarily failed, and asked for a new
